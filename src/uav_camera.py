@@ -1,6 +1,7 @@
 import math
 import numpy as np
 from helper import uav_position
+from conf_space import Pyramid3D
 
 
 class Camera:
@@ -43,6 +44,7 @@ class Camera:
         rng=np.random.default_rng(123),
         a=1,
         b=0.015,
+        conf_space=None,
     ):
         """
         Initialize the Camera.
@@ -58,6 +60,7 @@ class Camera:
             rng (np.random.Generator): Random number generator for simulation.
             a (float): Parameter for computing observation noise sigma.
             b (float): Parameter for computing observation noise sigma.
+            conf_space (conf space): Flag to indicate if pyramid configuration space is used.
         """
 
         self.grid = grid
@@ -84,7 +87,7 @@ class Camera:
             W = 2 * self.altitude * np.tan(theta_w / 2)  # Ground width (meters)
             H = 2 * self.altitude * np.tan(theta_h / 2)  # Ground height (meters)
 
-            # Compute step sizes based on overlap
+            # Compute step sizes based on overlap at lowest altitude
             xy_step_f = H * (1 - f_overlap)  # Forward step
             xy_step_s = W * (1 - s_overlap)  # Side step
             self.xy_step = round(xy_step_f, 2)
@@ -94,19 +97,30 @@ class Camera:
                 self.x_range[1] - self.x_range[0], self.y_range[1] - self.y_range[0]
             )
             self.xy_step = min_range / 2 / 8
+        if conf_space:
+            self.xy_step = 4
+            # print(
+            #     f"Using configuration space with xy_step: {self.xy_step} and grid length: {self.grid.length} fov: {self.fov} grid size: {self.grid.shape} gird center: {self.grid.center}"
+            # )
+            # Initialize pyramid configuration space
+            self.configuration_space = conf_space
 
-        if h_step is None:
-            self.h_step = self.xy_step / np.tan(np.deg2rad(self.fov * 0.5))
+            self.h_range = self.configuration_space.get_altitude_levels()
+            self.h_step = self.h_range[1] - self.h_range[0]
         else:
-            self.h_step = h_step
-        # Ensure altitude is set (if initially 0, use h_step).
-        if self.altitude == 0 or self.altitude is None:
-            self.altitude = self.h_step
-            # Define permissible altitude range (from current altitude to five steps above).
-        self.h_range = (self.altitude, self.altitude + 5 * self.h_step)
+            if h_step is None:
+                self.h_step = self.xy_step / np.tan(np.deg2rad(self.fov * 0.5))
+            else:
+                self.h_step = h_step
+            # Ensure altitude is set (if initially 0, use h_step).
+            if self.altitude == 0 or self.altitude is None:
+                self.altitude = self.h_step
+                # Define permissible altitude range (from current altitude to five steps above).
+            self.h_range = (self.altitude, self.altitude + 5 * self.h_step)
 
         # Define available actions.
         self.actions = {"up", "down", "front", "back", "left", "right", "hover"}
+        self.nominal_area = {}
         # print(f"H range: {self.h_range}")
         # print(f"xy_step {self.xy_step}, h_step {self.h_step}")
 
@@ -310,22 +324,44 @@ class Camera:
         """
         if x is None:
             x = self.get_x()
+
         # Compute future state based on action and ensure movement is within allowed ranges.
-        if action == "up" and (x.altitude + self.h_step) <= self.h_range[1]:
-            return (x.position, x.altitude + self.h_step)
-        elif action == "down" and (x.altitude - self.h_step) >= self.h_range[0]:
-            return (x.position, x.altitude - self.h_step)
-        elif action == "front" and (x.position[1] + self.xy_step) <= self.y_range[1]:
-            return (x.position[0], x.position[1] + self.xy_step), x.altitude
-        elif action == "back" and (x.position[1] - self.xy_step) >= self.y_range[0]:
-            return (x.position[0], x.position[1] - self.xy_step), x.altitude
-        elif action == "right" and (x.position[0] + self.xy_step) <= self.x_range[1]:
-            return (x.position[0] + self.xy_step, x.position[1]), x.altitude
-        elif action == "left" and (x.position[0] - self.xy_step) >= self.x_range[0]:
-            return (x.position[0] - self.xy_step, x.position[1]), x.altitude
+        if self.configuration_space:
+            # Use configuration space to determine future state.
+            future_point = self.configuration_space.get_future_point(
+                (
+                    x.position[0],
+                    x.position[1],
+                    x.altitude,
+                ),
+                action,
+            )
+            if future_point is not None:
+                return future_point[0:2], future_point[2]
+            else:
+                return x.position, x.altitude
         else:
-            # If action is not permitted, remain in the current state.
-            return x.position, x.altitude
+            if action == "up" and (x.altitude + self.h_step) <= self.h_range[1]:
+                return (x.position, x.altitude + self.h_step)
+            elif action == "down" and (x.altitude - self.h_step) >= self.h_range[0]:
+                return (x.position, x.altitude - self.h_step)
+            elif (
+                action == "front" and (x.position[1] + self.xy_step) <= self.y_range[1]
+            ):
+                return (x.position[0], x.position[1] + self.xy_step), x.altitude
+            elif action == "back" and (x.position[1] - self.xy_step) >= self.y_range[0]:
+                return (x.position[0], x.position[1] - self.xy_step), x.altitude
+            elif (
+                action == "right" and (x.position[0] + self.xy_step) <= self.x_range[1]
+            ):
+                return (x.position[0] + self.xy_step, x.position[1]), x.altitude
+            elif action == "left" and (x.position[0] - self.xy_step) >= self.x_range[0]:
+                return (x.position[0] - self.xy_step, x.position[1]), x.altitude
+            elif action == "hover":
+                return x.position, x.altitude
+            else:
+                # If action is not permitted, exception is raised.
+                return None
 
     def permitted_actions(self, x):
         """
@@ -344,7 +380,8 @@ class Camera:
 
         for action in self.actions:
             future_x = self.x_future(action, x=x)
-
+            if future_x == None:
+                continue
             # Altitude checks
             if action == "up" and future_x[1] <= self.h_range[1]:
                 permitted_actions.append(action)
@@ -362,3 +399,58 @@ class Camera:
                 permitted_actions.append(action)
 
         return permitted_actions
+
+    def get_footprint_area(self, position=None, altitude=None):
+        """
+        Calculate the footprint area at given position and altitude.
+
+        Args:
+            position (tuple): (x, y) position. Defaults to current.
+            altitude (float): Altitude. Defaults to current.
+
+        Returns:
+            float: Footprint area in square meters.
+        """
+        position = position or self.position
+        altitude = altitude or self.altitude
+        [[x_min, x_max], [y_min, y_max]] = self.get_range(
+            position, altitude, index_form=False
+        )
+
+        W = max(0, x_max - x_min)
+        H = max(0, y_max - y_min)
+
+        return W * H
+
+    def get_nominal_footprint_area(self, altitude=None):
+        """
+        Calculate the nominal footprint area at given altitude in square meters.
+        """
+
+        altitude = altitude or self.altitude
+
+        if self.nominal_area is None:
+            self.nominal_area = {}
+        if altitude in self.nominal_area:
+            return self.nominal_area[altitude]
+
+        area = self.get_footprint_area(position=(0, 0), altitude=altitude)
+
+        assert (
+            area > 0
+        ), f"(Nominal) Area must be positive, got {area} at altitude {altitude}"
+        self.nominal_area[altitude] = area
+        return self.nominal_area[altitude]
+
+    def border_compensation_factor(self, position, altitude, gamma=0.8, kappa=2.0):
+        """
+        Scale factor to undo border clipping without touching true altitude effects.
+        Returns >=1.0 near borders, ~=1.0 away from borders.
+        """
+        A_in = self.get_footprint_area(position=position, altitude=altitude)  # in-field
+        A_nom = self.get_nominal_footprint_area(altitude=altitude)  # nominal (free)
+        assert A_in > 0, f"A_in={A_in} must be non-negative"
+        frac = A_in / A_nom  # fraction inside [~0,1]
+        scale = (1.0 / frac) ** gamma  # density→nominal scaling
+        return min(scale, kappa)  # safety cap at the border
+        # return scale
