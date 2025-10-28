@@ -172,6 +172,9 @@ class uav_position:
     def __hash__(self):
         return hash((self.position, self.altitude))
 
+    def __repr__(self):
+        return f"({self.position[0]:.2f}, {self.position[1]:.2f},{self.altitude:.2f})"
+
 
 def compute_mse(ground_truth_map, estimated_map):
     if ground_truth_map.shape != estimated_map.shape:
@@ -462,8 +465,14 @@ def gaussian_random_field(cluster_radius, n_cell):
     - 2D binary random field as a numpy array.
     """
 
-    # Ensure cache directory exists
-    n_cell_x, n_cell_y = n_cell
+    # Allow both int (square) and (nx, ny) (rectangular)
+    if isinstance(n_cell, int):
+        n_cell_x = n_cell_y = n_cell
+    else:
+        n_cell_x, n_cell_y = n_cell
+
+    # # Ensure cache directory exists
+    # n_cell_x, n_cell_y = n_cell
 
     # Helper functions
     def _fft_indices(n):
@@ -523,6 +532,7 @@ def sample_binary_observations(belief_map, altitude, num_samples=5):
     b = 0.05
     var = a * (1 - np.exp(-b * altitude))
     noise_std = np.sqrt(var)
+    # noise_std = 0
 
     for i in range(num_samples):
         # Sample from the probability map with added Gaussian noise
