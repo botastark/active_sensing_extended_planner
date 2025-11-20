@@ -70,6 +70,7 @@ class Camera:
         self.fov = fov_angle
         self.a = a
         self.b = b
+        self.configuration_space = None
         # Define grid boundaries based on whether grid is centered or not.
         if self.grid.center:
             self.x_range = [-self.grid.x / 2, self.grid.x / 2]
@@ -98,7 +99,7 @@ class Camera:
             )
             self.xy_step = min_range / 2 / 8
         if conf_space:
-            self.xy_step = 4
+            self.xy_step = 5
             # print(
             #     f"Using configuration space with xy_step: {self.xy_step} and grid length: {self.grid.length} fov: {self.fov} grid size: {self.grid.shape} gird center: {self.grid.center}"
             # )
@@ -106,7 +107,9 @@ class Camera:
             self.configuration_space = conf_space
 
             self.h_range = self.configuration_space.get_altitude_levels()
+
             self.h_step = self.h_range[1] - self.h_range[0]
+            self.h_range = (self.h_range[0], self.h_range[-1])
         else:
             if h_step is None:
                 self.h_step = self.xy_step / np.tan(np.deg2rad(self.fov * 0.5))
@@ -247,6 +250,7 @@ class Camera:
         print(f"pos: {self.position} {self.altitude}")
         print(f"visible ranges x:({x_min}:{x_max}) y:({y_min}:{y_max})")
         """
+        # print(f"visible ranges x:({x_min}:{x_max}) y:({y_min}:{y_max})")
         # Return in world coordinate form.
         if not index_form:
             return [[x_min, x_max], [y_min, y_max]]
@@ -324,6 +328,8 @@ class Camera:
         """
         if x is None:
             x = self.get_x()
+        if action == "hover":
+            return x.position, x.altitude
 
         # Compute future state based on action and ensure movement is within allowed ranges.
         if self.configuration_space:
@@ -339,7 +345,9 @@ class Camera:
             if future_point is not None:
                 return future_point[0:2], future_point[2]
             else:
-                return x.position, x.altitude
+                # Hover option
+                # return x.position, x.altitude
+                return None
         else:
             if action == "up" and (x.altitude + self.h_step) <= self.h_range[1]:
                 return (x.position, x.altitude + self.h_step)
@@ -385,7 +393,7 @@ class Camera:
             # Altitude checks
             if action == "up" and future_x[1] <= self.h_range[1]:
                 permitted_actions.append(action)
-            elif action == "down" and future_x[1] >= self.h_range[0]:
+            elif action == "down" and future_x[1] > self.h_range[0]:
                 permitted_actions.append(action)
 
             # XY position checks (now using future_x)
@@ -419,8 +427,8 @@ class Camera:
 
         W = max(0, x_max - x_min)
         H = max(0, y_max - y_min)
-
-        return W * H
+        area = W * H
+        return area
 
     def get_nominal_footprint_area(self, altitude=None):
         """

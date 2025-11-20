@@ -96,11 +96,9 @@ results_*
 # ignore not relavant files
 src/tile_class.py
 src/classifier.py
-src/proj.py
-src/utilities.py
-src/conversion.py
-src/mapper.py
-data/gpstiles.csv
 model/*
 src/sampler.ipynb
-src/tile_experiments.ipynb
+
+
+shared_env/*
+trials/

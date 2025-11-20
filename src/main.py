@@ -24,6 +24,7 @@ from helper import create_run_folder, make_param_tag
 import matplotlib
 
 matplotlib.use("Agg")
+from conf_space import Pyramid3D, GridPoint
 
 
 # -----------------------------------------------------------------------------
@@ -100,11 +101,30 @@ def main():
         CACHE_DIR,
     ) = load_global_paths(config)
     # base_dir = create_run_folder(os.path.join(PROJECT_PATH, "results"))
-    base_dir = os.path.join(PROJECT_PATH, "trials")
+    base_dir = os.path.join(PROJECT_PATH, "trials_new_conf_space")
     run_base = f"{config['field_type'].lower()}_{config['start_position']}"
-    if config.get("action_strategy") == "mcts" and config.get("params_in_path", True):
-        run_base = run_base + "__" + make_param_tag(config.get("mcts_params", {}))
+    # if config.get("action_strategy") == "mcts" and config.get("params_in_path", True):
+    # run_base = run_base + "__" + make_param_tag(config.get("mcts_params", {}))
+    # # TODO remove this later when planning local change
+    border_comp = False
+    sample_obs = False
+    most_visited = False
+    run_base = run_base + "_" + config["action_strategy"].upper()
+    # if border_comp:
+    #     run_base = run_base + "_border_comp"
+    # else:
+    #     run_base = run_base + "_wout_border_comp"
+    if sample_obs:
+        run_base = run_base + "_sample_obs"
+    else:
+        run_base = run_base + "_expd_obs"
+    if most_visited:
+        run_base = run_base + "_most_visited"
+    else:
+        run_base = run_base + "_most_rewarded"
+
     results_folder = os.path.join(base_dir, run_base)
+    print(f"Results will be saved to: {results_folder}")
 
     ENABLE_STEPWISE_PLOTTING = config["enable_plotting"]
     ENABLE_LOGGING = config["enable_logging"]
@@ -129,7 +149,6 @@ def main():
     # -----------------------------------------------------------------------------
 
     # desktop += f"results_{field_type.lower()}_{start_position}_trial"
-
     if field_type == "Ortomap":
         grf_r = "orto"
         min_alt = 19.5
@@ -152,9 +171,12 @@ def main():
         optimal_alt = 21.5
 
         class grid_info:
-            x = 50
-            y = 50
-            length = 0.125
+            # x = 50
+            # y = 50
+            x = 60
+            y = 110
+            length = 1
+            # length = 0.125
             shape = (int(y / length), int(x / length))
             center = True
 
@@ -162,49 +184,17 @@ def main():
 
     seed = 123
     rng = np.random.default_rng(seed)
-
-    #     Pairs (N, M, h, dx) with dx close to 2.5 origin true:
-    # N=9, M=29, h=64.952, dx=2.5000
-    # N=10, M=30, h=60.622, dx=2.5000
-    # N=11, M=31, h=56.292, dx=2.5000
-    # N=12, M=32, h=51.962, dx=2.5000
-    # N=13, M=33, h=47.631, dx=2.5000
-    # N=14, M=34, h=43.301, dx=2.5000
-    # N=15, M=35, h=38.971, dx=2.5000
-    # N=16, M=36, h=34.641, dx=2.5000
-    # N=17, M=37, h=30.311, dx=2.5000
-    # N=18, M=38, h=25.981, dx=2.5000
-    # N=19, M=39, h=21.651, dx=2.5000
-
-    #     Pairs (N, M, h, dx) with dx close to 2.5 origin False:
-    # N=1, M=21, h=49.796, dx=2.5000
-    # N=2, M=22, h=47.631, dx=2.5000
-    # N=3, M=23, h=45.466, dx=2.5000
-    # N=4, M=24, h=43.301, dx=2.5000
-    # N=5, M=25, h=41.136, dx=2.5000
-    # N=6, M=26, h=38.971, dx=2.5000
-    # N=7, M=27, h=36.806, dx=2.5000
-    # N=8, M=28, h=34.641, dx=2.5000
-    # N=9, M=29, h=32.476, dx=2.5000
-    # N=10, M=30, h=30.311, dx=2.5000
-    # N=11, M=31, h=28.146, dx=2.5000
-    # N=12, M=32, h=25.981, dx=2.5000
-    # N=13, M=33, h=23.816, dx=2.5000
-    # N=14, M=34, h=21.651, dx=2.5000
-
-    # xy_step = 2.5
-    # # h_range = [21.651, 30.311, 38.971, 47.631, 56.292, 64.952]
-    # h_range = [21.651, 25.981, 30.311, 34.641, 38.971, 43.301]
-    # min_alt = min(h_range)  # Minimum altitude for the camera
-    # fov = 60  # Field of view angle in degrees
-    # camera1 = Camera(
-    #     grid=grid_info,
-    #     fov_angle=fov,
-    #     xy_step=xy_step,
-    #     h_range=h_range,
-    #     rng=rng,
-    #     camera_altitude=min_alt,
-    # )
+    xy_step_in_cells = 5  # grid cells in xy per camera step
+    # TODO: adjust pyramid3D parameters as needed
+    configuration_space = Pyramid3D(
+        (grid_info.x, grid_info.y),
+        xy_step_in_cells,
+        grid_info.length,
+        np.deg2rad(60),
+        center_on_origin=grid_info.center,
+    )
+    # TODO: conf space none to test original camera
+    # configuration_space = None
     #    # Uncomment the following line to use the original Camera class
     camera1 = Camera(
         grid_info,
@@ -213,6 +203,7 @@ def main():
         camera_altitude=min_alt,
         f_overlap=overlap,
         s_overlap=overlap,
+        conf_space=configuration_space,
     )
     map = Field(
         grid_info,
@@ -270,71 +261,59 @@ def main():
                     action_strategy,
                     conf_dict=conf_dict,
                     optimal_alt=optimal_alt,
+                    # seed=seed,
                     mcts_params=mcts_params,
+                    ground_truth_map=None,
+                    local=False,
+                    border_comp=border_comp,
+                    sample_obs=sample_obs,
+                    most_visited=most_visited,
                 )
                 # Select initial UAV starting position
-
-                if start_position == "edge":
-                    # w = 2 * min_alt * np.tan(np.deg2rad(fov * 0.5))
-                    real_border = [
-                        (
-                            -grid_info.x / 2,
-                            random.uniform(-grid_info.y / 2, grid_info.y / 2),
-                        ),  # Left border
-                        (
-                            grid_info.x / 2,
-                            random.uniform(-grid_info.y / 2, grid_info.y / 2),
-                        ),  # Right border
-                        (
-                            random.uniform(-grid_info.x / 2, grid_info.x / 2),
-                            grid_info.y / 2,
-                        ),  # Top border
-                        (
-                            random.uniform(-grid_info.x / 2, grid_info.x / 2),
-                            -grid_info.y / 2,
-                        ),  # Bottom border
-                    ]
-                    # borders = [
-                    #     (
-                    #         -grid_info.x / 2 + w / 2,
-                    #         random.uniform(
-                    #             -grid_info.y / 2 + w / 2, grid_info.y / 2 - w / 2
-                    #         ),
-                    #     ),  # Left border (x fixed, y random within inset vertical range)
-                    #     (
-                    #         grid_info.x / 2 - w / 2,
-                    #         random.uniform(
-                    #             -grid_info.y / 2 + w / 2, grid_info.y / 2 - w / 2
-                    #         ),
-                    #     ),  # Right border (x fixed, y random within inset vertical range)
-                    #     (
-                    #         random.uniform(
-                    #             -grid_info.x / 2 + w / 2, grid_info.x / 2 - w / 2
-                    #         ),
-                    #         grid_info.y / 2 - w / 2,
-                    #     ),  # Top border (y fixed, x random within inset horizontal range)
-                    #     (
-                    #         random.uniform(
-                    #             -grid_info.x / 2 + w / 2, grid_info.x / 2 - w / 2
-                    #         ),
-                    #         -grid_info.y / 2 + w / 2,
-                    #     ),  # Bottom border (y fixed, x random within inset horizontal range)
-                    # ]
-
-                    start_pos = random.choice(real_border)
-
-                elif start_position == "corner":
-                    start_pos = random.choice(
-                        [
-                            (-grid_info.x / 2, -grid_info.y / 2),
-                            (-grid_info.x / 2, grid_info.y / 2),
-                            (grid_info.x / 2, -grid_info.y / 2),
-                            (grid_info.x / 2, grid_info.y / 2),
-                        ]
+                # TODO: update startpos for POINT
+                if configuration_space is not None:
+                    start_pos = configuration_space.sample_start_position(
+                        position=start_position, rng=rng
                     )
-                    # start_pos = (grid_info.x / 2, -grid_info.y / 2)
+                else:
+                    if start_position == "edge":
+                        # w = 2 * min_alt * np.tan(np.deg2rad(fov * 0.5))
+                        real_border = [
+                            (
+                                -grid_info.x / 2,
+                                random.uniform(-grid_info.y / 2, grid_info.y / 2),
+                            ),  # Left border
+                            (
+                                grid_info.x / 2,
+                                random.uniform(-grid_info.y / 2, grid_info.y / 2),
+                            ),  # Right border
+                            (
+                                random.uniform(-grid_info.x / 2, grid_info.x / 2),
+                                grid_info.y / 2,
+                            ),  # Top border
+                            (
+                                random.uniform(-grid_info.x / 2, grid_info.x / 2),
+                                -grid_info.y / 2,
+                            ),  # Bottom border
+                        ]
+                        start_pos = random.choice(real_border)
+
+                    elif start_position == "corner":
+                        start_pos = random.choice(
+                            [
+                                (-grid_info.x / 2, -grid_info.y / 2),
+                                (-grid_info.x / 2, grid_info.y / 2),
+                                (grid_info.x / 2, -grid_info.y / 2),
+                                (grid_info.x / 2, grid_info.y / 2),
+                            ]
+                        )
+
                 # Initialize UAV position and list for tracking path and actions
-                uav_pos = uav_position((start_pos, camera1.get_hrange()[0]))
+                if type(start_pos) is GridPoint:
+                    uav_pos = uav_position((start_pos.coord[0:2], start_pos.coord[2]))
+                else:
+                    uav_pos = uav_position((start_pos, camera1.get_hrange()[0]))
+
                 uav_positions, actions = [uav_pos], []
                 # Update camera settings based on UAV initial state
                 camera1.set_altitude(uav_pos.altitude)
@@ -343,18 +322,7 @@ def main():
                 observed_ids = set()
                 entropy, mse, height, coverage = [], [], [], []
                 if ENABLE_LOGGING:
-                    # Initialize logger for this iteration
-                    # logger = FastLogger(
-                    #     log_folder,
-                    #     strategy=action_strategy,
-                    #     pairwise=corr_type,
-                    #     grid=grid_info,
-                    #     init_x=uav_pos,
-                    #     r=grf_r,
-                    #     n_agent=iter,
-                    #     e=e_margin,
-                    #     conf_dict=conf_dict,
-                    # )
+
                     logger = FastLogger(
                         log_folder,
                         strategy=action_strategy,
@@ -464,6 +432,18 @@ def main():
                     next_action, info_gain_action = planner.select_action(
                         belief_map, uav_positions
                     )
+                    print(f"Step {step}: Selected action {next_action}")
+                    print(f"Current UAV position: {uav_pos}")
+                    igs_sorted = dict(
+                        sorted(
+                            info_gain_action.items(), key=lambda kv: kv[1], reverse=True
+                        )
+                    )
+
+                    for a, ig in igs_sorted.items():
+                        print(f"{a}\t - {ig:.12f}")
+
+                    print("________________________________")
 
                     # Update UAV position based on the next action
                     uav_pos = uav_position(camera1.x_future(next_action))

@@ -1,6 +1,6 @@
 import copy
 import numpy as np
-from helper import uav_position, H, expected_posterior
+from helper import uav_position, H, expected_posterior, sample_binary_observations
 from new_camera import Camera
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,7 +41,17 @@ class MCTSNode:
     about its parent, children, action taken to reach it, visit count, and total reward.
     """
 
-    def __init__(self, state, camera, parent=None, action=None, conf_dict=None):
+    def __init__(
+        self,
+        state,
+        camera,
+        parent=None,
+        action=None,
+        conf_dict=None,
+        ground_truth_map=None,
+        local=True,
+        sample_obs=False,
+    ):
         self.state = copy_state(
             state
         )  # The state represented by this node state = {'uav_pos': uav_pos, 'belief': current_belief_map}  # State representation
@@ -54,6 +64,12 @@ class MCTSNode:
         self.untried_actions = set(camera.permitted_actions(self.state["uav_pos"]))
         self.conf_dict = conf_dict  # Optional configuration dictionary for sensor model
         self.lock = threading.Lock()  # For thread-safe updates
+        # TODO dont forget to remove gtmap and local from here after testing
+        self.ground_truth_map = ground_truth_map  # Store ground truth
+        self.local = local  # Whether to compute local mse or global mse
+        self.sample_obs = (
+            sample_obs  # Whether to sample observations in MCTS simulations
+        )
 
     def is_fully_expanded(self):
         # all possible actions have been tried
@@ -140,6 +156,12 @@ class MCTSNode:
         expected_entropy = Pz0 * H(p_m1_z0) + Pz1 * H(p_m1_z1)
         return np.sum(curr_entropy - expected_entropy)
 
+    def compute_mse_reward(self, obs_belief_map, ground_truth_map):
+        # local refers to whether to compute mse on just the observed submap or the whole map
+        return -np.mean(
+            (obs_belief_map - ground_truth_map) ** 2
+        )  # negative mse as reward
+
     def rollout(
         self,
         max_depth=10,
@@ -168,18 +190,56 @@ class MCTSNode:
                 index_form=True,
             )
 
-            obs_submap = state["belief"][imin:imax, jmin:jmax, 1]
+            prior_belief = state["belief"][imin:imax, jmin:jmax, 1]
             # 4. Simulate observation and
-            a, b, p10, p11 = expected_posterior(obs_submap, s0, s1)
 
-            # 5. Compute immediate reward (e.g., info gain)
-            reward = self.compute_reward(obs_submap, a, b, p10, p11)
+            """ Sampled observation """
+            if self.sample_obs:
+                sampled_obs = sample_binary_observations(
+                    prior_belief, state["uav_pos"].altitude, num_samples=1
+                )
+                sampled_obs = (sampled_obs >= 0.5).astype(int)
+                # Likelihoods
+                likelihood_m0 = np.where(sampled_obs == 0, 1 - s0, s0)
+                likelihood_m1 = np.where(sampled_obs == 0, s1, 1 - s1)
+
+                # Posterior update
+                posterior_m0 = likelihood_m0 * (1 - prior_belief)
+                posterior_m1 = likelihood_m1 * prior_belief
+                denom = posterior_m0 + posterior_m1 + 1e-9
+                posterior = posterior_m1 / denom
+
+                # Reward = entropy reduction
+                prev_entropy = H(prior_belief)
+                post_entropy = H(posterior)
+                reward = np.sum(prev_entropy - post_entropy)
+                # 6. Update belief based on observation
+                state["belief"][i_min:i_max, j_min:j_max, 1] = posterior
+                state["belief"][i_min:i_max, j_min:j_max, 0] = 1 - posterior
+            else:
+                # END of sampled observation
+                # """"""
+                # """ expetected observation
+                a, b, p10, p11 = expected_posterior(prior_belief, s0, s1)
+
+                # 5. Compute immediate reward (e.g., info gain)
+                if self.local and self.ground_truth_map is not None:
+                    reward = self.compute_mse_reward(
+                        prior_belief, self.ground_truth_map[imin:imax, jmin:jmax]
+                    )
+                elif self.ground_truth_map is not None:
+                    reward = self.compute_mse_reward(
+                        state["belief"][:, :, 1], self.ground_truth_map[:, :]
+                    )
+                else:
+                    reward = self.compute_reward(prior_belief, a, b, p10, p11)
+                # 6. Update belief based on observation
+                state["belief"] = self.belief_update(
+                    state["belief"], imin, imax, jmin, jmax, a, b, p10, p11
+                )
+                # """
+
             total_reward += discount * reward
-
-            # 6. Update belief based on observation
-            state["belief"] = self.belief_update(
-                state["belief"], imin, imax, jmin, jmax, a, b, p10, p11
-            )
             discount *= discount_factor
         return total_reward
 
@@ -232,8 +292,22 @@ class MCTSPlanner:
         max_depth=10,
         parallel=1,
         ucb1_c=1.4,
+        ground_truth_map=None,
+        local=True,
+        sample_obs=False,
+        most_visited=False,
     ):
-        self.root = MCTSNode(initial_state, uav_camera, conf_dict=conf_dict)
+        self.root = MCTSNode(
+            initial_state,
+            uav_camera,
+            conf_dict=conf_dict,
+            ground_truth_map=ground_truth_map,
+            local=local,
+            sample_obs=sample_obs,
+        )
+        self.most_visited = most_visited
+        # TODO dont forget to remove gtmap, sample_obs, most_visited and local from here after testing
+        self.sample_obs = sample_obs
         self.discount_factor = discount_factor
         self.max_depth = max_depth
         self.parallel = parallel
@@ -254,7 +328,8 @@ class MCTSPlanner:
                     break
                 node, path = self.tree_policy()
                 reward = node.rollout(
-                    discount_factor=self.discount_factor, max_depth=self.max_depth
+                    discount_factor=self.discount_factor,
+                    max_depth=self.max_depth,
                 )
                 node.backpropagate(reward)
         else:
@@ -269,12 +344,6 @@ class MCTSPlanner:
                     # Schedule the rollout
                     fut = executor.submit(self._simulate_only, node)
                     futures[fut] = path
-                    # futures.append(
-                    #     executor.submit(
-                    #         node.rollout, self.max_depth, self.discount_factor
-                    #     )
-                    # )
-                    # paths.append(node)
 
                 for fut in as_completed(futures):
                     try:
@@ -286,20 +355,7 @@ class MCTSPlanner:
                         traceback.print_exc()
                         continue
                     path = futures[fut]
-                    # node.backpropagate(reward)
                     MCTSNode.backprop_with_reward(path, reward, vloss=1.0)
-
-        # def search(self, num_iterations=100, return_action_scores=False, timeout=None):
-        #     start_time = time.time()
-        #     for _ in range(num_iterations):
-        #         if timeout is not None and (time.time() - start_time) >= timeout:
-        #             print(
-        #                 f"Timeout reached after {(time.time() - start_time):.2f} seconds."
-        #             )
-        #             break
-        #         node = self.tree_policy()
-        #         reward = node.rollout(discount_factor=self.discount_factor)
-        #         node.backpropagate(reward)
         best_action = self.best_action()
         if return_action_scores:
             action_scores = {
@@ -323,26 +379,22 @@ class MCTSPlanner:
                 path.append(node)
         return node, path
 
-    # def best_action(self):
-    #     # Choose the action from root's children with the highest visit count
-    #     best = max(self.root.children.values(), key=lambda n: n.visit_count)
-    #     return best.action_from_parent
-
     def best_action(self):
-        # Choose the action from root's children with the highest avg value
-        best = max(
-            self.root.children.values(), key=lambda n: n.value / max(1, n.visit_count)
-        )
+        # Choose the action from root's children with the highest visit count if most visited true
+        #  highest avg value if most visited false
+        # to b e called in search
+
+        if self.most_visited:
+            best = max(self.root.children.values(), key=lambda n: n.visit_count)
+        else:
+            best = max(
+                self.root.children.values(),
+                key=lambda n: n.value / max(1, n.visit_count),
+            )
         return best.action_from_parent
 
     def visualize_tree(self, max_depth=2):
         self.root.print_tree(max_depth=max_depth)
-
-    # def _rollout_and_backpropagate(self, node):
-    #     reward = node.rollout(
-    #         discount_factor=self.discount_factor, max_depth=self.max_depth
-    #     )
-    # node.backpropagate(reward)
 
 
 def test_mcts_planner_search_and_best_action():
@@ -384,5 +436,5 @@ def test_mcts_planner_search_and_best_action():
     print("test_mcts_planner_search_and_best_action passed.")
 
 
-if __name__ == "__main__":
-    test_mcts_planner_search_and_best_action()
+# if __name__ == "__main__":
+#     test_mcts_planner_search_and_best_action()

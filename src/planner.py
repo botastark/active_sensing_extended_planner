@@ -1,4 +1,3 @@
-import random
 import numpy as np
 import math
 from helper import uav_position, H, cH
@@ -15,6 +14,12 @@ class planning:
         conf_dict=None,
         optimal_alt=21.6,
         mcts_params=None,
+        ground_truth_map=None,
+        local=True,
+        border_comp=False,
+        sample_obs=False,
+        most_visited=False,
+        seed=None,
     ):
         # Initialize belief map (each cell has a default probability of 0.5) and set UAV planning parameters
         self.M = np.full((grid_info.shape[0], grid_info.shape[1], 2), 0.5)
@@ -24,6 +29,17 @@ class planning:
         self.conf_dict = conf_dict
         self.optimal_altitude = optimal_alt
         self.sweep_direction = None
+        if seed is not None:
+            self.rng = np.random.default_rng(seed)
+        else:
+            self.rng = np.random.default_rng()
+
+        self.ground_truth_map = ground_truth_map
+        self.local = local
+        self.border_comp = border_comp
+        self.sample_obs = sample_obs  # Whether to sample observations in MCTS
+        self.most_visited = most_visited  # Whether to choose most visited action in MCTS or best avg reward
+
         # MCTS parameters with defaults
         if mcts_params is None:
             mcts_params = {}
@@ -34,6 +50,8 @@ class planning:
             "ucb1_c": mcts_params.get("ucb1_c", 1.4),
             "parallel": mcts_params.get("parallel", 8),
             "discount_factor": mcts_params.get("discount_factor", 1.0),
+            # "ground_truth_map": mcts_params.get("ground_truth_map", None),
+            # "local": mcts_params.get("local", True),
         }
 
     def reset(self, conf_dict=None):
@@ -85,7 +103,7 @@ class planning:
                     else "BackFront"
                 )
             else:
-                self.sweep_direction = random.choice(["LeftRight", "BackFront"])
+                self.sweep_direction = self.rng.choice(["LeftRight", "BackFront"])
 
         # self.sweep_direction = "LeftRight"
         if self.sweep_direction == "LeftRight":
@@ -120,6 +138,7 @@ class planning:
         for action in permitted_actions:
             # UAV position after taking action a
             x_future = uav_position(self.uav.x_future(action))
+            # print(f" {action} -> {x_future.position}, {x_future.altitude}")
             info_gain_action_a = 0
             [[obsd_m_i_min, obsd_m_i_max], [obsd_m_j_min, obsd_m_j_max]] = (
                 self.uav.get_range(
@@ -129,18 +148,31 @@ class planning:
                 )
             )
             obs_M = self.M[obsd_m_i_min:obsd_m_i_max, obsd_m_j_min:obsd_m_j_max, 1]
+            # print(f"obs_M shape = {obs_M.shape}")
+            # print(f"obs sum :{np.sum(obs_M):.5f}")
             info_gain_action_a = np.sum(self.info_gain(obs_M, x_future))
+            if self.border_comp:
+                border_factor = self.uav.border_compensation_factor(
+                    position=x_future.position, altitude=x_future.altitude
+                )
+                info_gain_action_a *= border_factor
             info_gain_action[action] = info_gain_action_a
+            # print(f"Info Gain = {info_gain_action_a:.4f}")
+            # print("-------------------------")
 
         # Find the maximum information gain
         max_gain = max(info_gain_action.values())
 
-        # Collect actions with the maximum info gain
+        eps = 1e-4
+        # Collect actions with the maximum info gain + eps tolerance
         max_gain_actions = [
-            action for action, gain in info_gain_action.items() if gain == max_gain
+            action
+            for action, gain in info_gain_action.items()
+            if gain >= max_gain - eps
         ]
+        print(f"Max IG actions: {max_gain_actions} with IG={max_gain:.12f}")
 
-        next_action = random.choice(max_gain_actions)
+        next_action = self.rng.choice(max_gain_actions)
         # Update previous action for the next step
         self.last_action = next_action
         return next_action, info_gain_action
@@ -220,8 +252,9 @@ class planning:
             action_ig_total[a1] = cumulative_ig
 
         max_ig = max(action_ig_total.values())
-        best_actions = [a for a, val in action_ig_total.items() if val == max_ig]
-        next_action = random.choice(best_actions)
+        eps = 1e-4
+        best_actions = [a for a, val in action_ig_total.items() if val >= max_ig - eps]
+        next_action = self.rng.choice(best_actions)
         self.last_action = next_action
         return next_action, action_ig_total
 
@@ -261,15 +294,16 @@ class planning:
             info_score[action] = score
 
         # Choose best
+        eps = 1e-4
         best_actions = [
-            a for a, s in info_score.items() if s == max(info_score.values())
+            a for a, s in info_score.items() if s >= max(info_score.values() - eps)
         ]
-        next_action = random.choice(best_actions)
+        next_action = self.rng.choice(best_actions)
         self.last_action = next_action
         return next_action, info_score
 
     def entropy_guided_combined(
-        self, permitted_actions, epsilon=1e-3, local_weight=1.0, global_weight=1.0
+        self, permitted_actions, local_weight=1.0, global_weight=1.0
     ):
         entropy_map = H(self.M[:, :, 1])
         info_score = {}
@@ -277,6 +311,7 @@ class planning:
         rows, cols = entropy_map.shape
         i_indices = np.arange(rows).reshape(-1, 1)  # (rows, 1)
         j_indices = np.arange(cols).reshape(1, -1)  # (1, cols)
+        eps = 1e-4
 
         for action in permitted_actions:
             # Simulate future pose
@@ -287,7 +322,7 @@ class planning:
             i_fut, j_fut = self.uav.convert_xy_ij(*x_pos, self.uav.grid.center)
 
             # Compute Manhattan distance map from x_future position
-            dist_map = np.abs(i_indices - i_fut) + np.abs(j_indices - j_fut) + epsilon
+            dist_map = np.abs(i_indices - i_fut) + np.abs(j_indices - j_fut) + eps
             weighted_entropy_map = entropy_map / dist_map
 
             # Get sensor footprint
@@ -310,9 +345,9 @@ class planning:
 
         # Select best action
         best_actions = [
-            a for a, s in info_score.items() if s == max(info_score.values())
+            a for a, s in info_score.items() if s >= max(info_score.values()) - eps
         ]
-        next_action = random.choice(best_actions)
+        next_action = self.rng.choice(best_actions)
         self.last_action = next_action
         return next_action, info_score
 
@@ -344,6 +379,10 @@ class planning:
             max_depth=params["planning_depth"],
             parallel=params["parallel"],
             ucb1_c=params["ucb1_c"],
+            ground_truth_map=self.ground_truth_map,
+            local=self.local,
+            sample_obs=self.sample_obs,
+            most_visited=self.most_visited,
         )
         action, score = mcts_planner.search(
             num_iterations=params["num_iterations"],
